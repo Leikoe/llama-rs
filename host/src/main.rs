@@ -3,11 +3,11 @@ use cust::{
     prelude::*,
 };
 
-const vec_add_ptx: &'static str = include_str!(concat!(env!("OUT_DIR"), "/kernels.ptx"));
+const kernels_ptx: &'static str = include_str!(concat!(env!("OUT_DIR"), "/kernels.ptx"));
 
 fn main() {
     let _ctx = cust::quick_init().unwrap();
-    let module = Module::from_ptx(vec_add_ptx, &[]).unwrap();
+    let module = Module::from_ptx(kernels_ptx, &[]).unwrap();
     let vec_add = module.get_function("vecadd").unwrap();
     let stream = Stream::new(StreamFlags::NON_BLOCKING, None).unwrap();
 
