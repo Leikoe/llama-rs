@@ -3,10 +3,53 @@ use cust::{
     prelude::*,
 };
 use half::bf16;
+use memmap2::MmapOptions;
+use safetensors::SafeTensors;
+use std::fs::File;
 use std::io;
 use tokenizers::Tokenizer;
 
 const kernels_ptx: &'static str = include_str!(concat!(env!("OUT_DIR"), "/kernels.ptx"));
+
+const B: usize = 1;
+const V: usize = 50257;
+const D: usize = 768;
+
+struct Gpt2 {
+    wte: Box<[bf16; V * D]>,
+    wpe: Box<[bf16; 1024 * D]>,
+}
+
+impl Gpt2 {
+    fn new(safetensors_path: &str) -> Result<Self, safetensors::SafeTensorError> {
+        let file = File::open(safetensors_path)?;
+        let mut model = unsafe {
+            Gpt2 {
+                wte: Box::<[bf16; V * D]>::new_uninit().assume_init(),
+                wpe: Box::<[bf16; 1024 * D]>::new_uninit().assume_init(),
+            }
+        };
+
+        let buffer = unsafe { MmapOptions::new().map(&file).unwrap() };
+        let tensors = SafeTensors::deserialize(&buffer)?;
+        // for (k, v) in tensors.tensors() {
+        //     println!("{}: shape={:?} dtype={:?}", k, v.shape(), v.dtype());
+        // }
+        let wte_view = tensors.tensor("wte.weight").unwrap();
+        let wte_ptr = wte_view.data().as_ptr() as *const f32;
+        for i in 0..wte_view.shape().into_iter().product() {
+            model.wte[i] = bf16::from_f32(unsafe { wte_ptr.add(i).read() });
+        }
+
+        let wpe_view = tensors.tensor("wpe.weight").unwrap();
+        let wpe_ptr = wpe_view.data().as_ptr() as *const f32;
+        for i in 0..wpe_view.shape().into_iter().product() {
+            model.wte[i] = bf16::from_f32(unsafe { wpe_ptr.add(i).read() });
+        }
+
+        Ok(model)
+    }
+}
 
 fn main() -> io::Result<()> {
     let _ctx = cust::quick_init().unwrap();
@@ -15,24 +58,18 @@ fn main() -> io::Result<()> {
     let embedding = module.get_function("embedding").unwrap();
     let stream = Stream::new(StreamFlags::NON_BLOCKING, None).unwrap();
 
-    let prompt = "Hello, I'm a language model,";
+    // TOKENIZER
     let tokenizer = Tokenizer::from_pretrained("gpt2", None).unwrap();
+
+    // MODEL
+    let model = Gpt2::new("model.safetensors").unwrap();
+
+    let prompt = "Hello, I'm a language model,";
     let encoding = tokenizer.encode(prompt, false).unwrap();
     let token_ids_host = encoding.get_ids();
-
-    const B: usize = 1;
     let T: usize = token_ids_host.len();
-    let V: usize = tokenizer.get_vocab_size(false);
-    const D: usize = 768;
 
-    let mut embeddings_host = vec![bf16::ZERO; V * D];
-    for i in 0..V {
-        for d in 0..D {
-            embeddings_host[i * D + d] = bf16::from_f32(i as f32);
-        }
-    }
-
-    let embeddings: DeviceBuffer<bf16> = DeviceBuffer::from_slice(&embeddings_host).unwrap();
+    let embeddings: DeviceBuffer<bf16> = DeviceBuffer::from_slice(model.wte.as_slice()).unwrap();
     let token_ids: DeviceBuffer<u32> = DeviceBuffer::from_slice(&token_ids_host).unwrap();
     let mut token_embeddings: DeviceBuffer<bf16> =
         unsafe { DeviceBuffer::uninitialized(B * T * D).unwrap() };
@@ -60,14 +97,14 @@ fn main() -> io::Result<()> {
         .copy_to(&mut out_host[..])
         .expect("out_host should be long enough");
 
-    // for b in 0..B {
-    //     for t in 0..T {
-    //         println!(
-    //             "{:?}",
-    //             &out_host[(b * T * D + t * D)..(b * T * D + t * D + D)]
-    //         )
-    //     }
-    // }
+    for b in 0..B {
+        for t in 0..T {
+            println!(
+                "{:?}",
+                &out_host[(b * T * D + t * D)..(b * T * D + t * D + D)]
+            )
+        }
+    }
 
     Ok(())
 }
