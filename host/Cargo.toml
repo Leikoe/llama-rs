@@ -1,0 +1,10 @@
+[package]
+name = "host"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+cust = { git = "https://github.com/Rust-GPU/Rust-CUDA" }
+
+[build-dependencies]
+nvptx-builder = { git = "https://github.com/Gui-Yom/turbo-metrics" }
