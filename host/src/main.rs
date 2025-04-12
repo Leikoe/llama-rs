@@ -2,6 +2,7 @@ use cust::{
     function::{BlockSize, GridSize},
     prelude::*,
 };
+use half::bf16;
 
 const kernels_ptx: &'static str = include_str!(concat!(env!("OUT_DIR"), "/kernels.ptx"));
 
@@ -22,16 +23,16 @@ fn main() {
         token_ids_host[i] = (i % V) as u32;
     }
 
-    let mut embeddings_host = vec![0f32; V * D];
+    let mut embeddings_host = vec![bf16::ZERO; V * D];
     for i in 0..V {
         for d in 0..D {
-            embeddings_host[i * D + d] = i as f32;
+            embeddings_host[i * D + d] = bf16::from_f32(i as f32);
         }
     }
 
-    let embeddings: DeviceBuffer<f32> = DeviceBuffer::from_slice(&embeddings_host).unwrap();
+    let embeddings: DeviceBuffer<bf16> = DeviceBuffer::from_slice(&embeddings_host).unwrap();
     let token_ids: DeviceBuffer<u32> = DeviceBuffer::from_slice(&token_ids_host).unwrap();
-    let mut token_embeddings: DeviceBuffer<f32> =
+    let mut token_embeddings: DeviceBuffer<bf16> =
         unsafe { DeviceBuffer::uninitialized(B * T * D).unwrap() };
 
     let grid_size = GridSize::xy(B as u32, T as u32);
@@ -52,7 +53,7 @@ fn main() {
 
     stream.synchronize().unwrap();
 
-    let mut out_host = vec![0.0f32; B * T * D];
+    let mut out_host = vec![bf16::ZERO; B * T * D];
     token_embeddings
         .copy_to(&mut out_host[..])
         .expect("out_host should be long enough");

@@ -8,6 +8,7 @@ crate-type = ["rlib", "cdylib"]
 
 [dependencies]
 nvptx-std = { git = "https://github.com/Gui-Yom/turbo-metrics" }
+half = { version = "2.6.0", default-features = false }
 
 [build-dependencies]
 nvptx-builder = { git = "https://github.com/Gui-Yom/turbo-metrics" }

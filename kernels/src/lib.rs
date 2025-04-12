@@ -5,6 +5,7 @@
 
 use core::arch::nvptx;
 use core::ops::Add;
+use half::bf16;
 use nvptx_std::prelude::*;
 
 #[unsafe(no_mangle)]
@@ -15,9 +16,9 @@ pub unsafe extern "ptx-kernel" fn vecadd(a: *const f32, b: *const f32, mut out: 
 
 #[unsafe(no_mangle)]
 pub unsafe extern "ptx-kernel" fn embedding(
-    embeddings: *const f32,         // (V, D)
-    token_ids: *const u32,          // (B, T)
-    mut token_embeddings: *mut f32, // (B, T, D)
+    embeddings: *const bf16,         // (V, D)
+    token_ids: *const u32,           // (B, T)
+    mut token_embeddings: *mut bf16, // (B, T, D)
     b: usize,
     t: usize,
     d: usize,
