@@ -9,9 +9,17 @@ use half::bf16;
 use nvptx_std::prelude::*;
 
 #[unsafe(no_mangle)]
-pub unsafe extern "ptx-kernel" fn vecadd(a: *const f32, b: *const f32, mut out: *mut f32) {
+pub unsafe extern "ptx-kernel" fn vecadd(
+    a: *const bf16,
+    b: *const bf16,
+    mut out: *mut bf16,
+    N: usize,
+) {
     let idx = coords_1d();
-    *out.wrapping_add(idx) = *a.wrapping_add(idx) + *b.wrapping_add(idx);
+
+    if idx < N {
+        *out.wrapping_add(idx) = *a.wrapping_add(idx) + *b.wrapping_add(idx);
+    }
 }
 
 #[unsafe(no_mangle)]

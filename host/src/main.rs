@@ -68,9 +68,10 @@ fn main() -> io::Result<()> {
     let encoding = tokenizer.encode(prompt, false).unwrap();
     let token_ids_host = encoding.get_ids();
     let T: usize = token_ids_host.len();
-
-    let embeddings: DeviceBuffer<bf16> = DeviceBuffer::from_slice(model.wte.as_slice()).unwrap();
     let token_ids: DeviceBuffer<u32> = DeviceBuffer::from_slice(&token_ids_host).unwrap();
+
+    // wte
+    let wte: DeviceBuffer<bf16> = DeviceBuffer::from_slice(model.wte.as_slice()).unwrap();
     let mut token_embeddings: DeviceBuffer<bf16> =
         unsafe { DeviceBuffer::uninitialized(B * T * D).unwrap() };
 
@@ -79,7 +80,7 @@ fn main() -> io::Result<()> {
     unsafe {
         launch!(
             embedding<<<grid_size, block_size, 0, stream>>>(
-                embeddings.as_device_ptr(),
+                wte.as_device_ptr(),
                 token_ids.as_device_ptr(),
                 token_embeddings.as_device_ptr(),
                 B,
@@ -90,10 +91,49 @@ fn main() -> io::Result<()> {
         );
     }
 
+    // wpe
+    let wpe: DeviceBuffer<bf16> = DeviceBuffer::from_slice(model.wpe.as_slice()).unwrap();
+    let positions_host = (0..T as u32).collect::<Vec<u32>>();
+    let positions: DeviceBuffer<u32> = DeviceBuffer::from_slice(&positions_host).unwrap();
+    let mut token_position_embeddings: DeviceBuffer<bf16> =
+        unsafe { DeviceBuffer::uninitialized(B * T * D).unwrap() };
+
+    let grid_size = GridSize::xy(B as u32, T as u32);
+    let block_size = BlockSize::xy(1, 1);
+    unsafe {
+        launch!(
+            embedding<<<grid_size, block_size, 0, stream>>>(
+                wpe.as_device_ptr(),
+                positions.as_device_ptr(),
+                token_position_embeddings.as_device_ptr(),
+                B,
+                T,
+                D,
+                1024,
+            )
+        );
+    }
+
+    // sum
+    let embeddings: DeviceBuffer<bf16> = unsafe { DeviceBuffer::uninitialized(B * T * D).unwrap() };
+
+    let grid_size = GridSize::x(((B * T * D) as f32 / 256.0).ceil() as u32);
+    let block_size = BlockSize::x(256);
+    unsafe {
+        launch!(
+            module.vecadd<<<grid_size, block_size, 0, stream>>>(
+                token_embeddings.as_device_ptr(),
+                token_position_embeddings.as_device_ptr(),
+                embeddings.as_device_ptr(),
+                B * T * D
+            )
+        );
+    }
+
     stream.synchronize().unwrap();
 
     let mut out_host = vec![bf16::ZERO; B * T * D];
-    token_embeddings
+    embeddings
         .copy_to(&mut out_host[..])
         .expect("out_host should be long enough");
 
