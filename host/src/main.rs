@@ -3,25 +3,27 @@ use cust::{
     prelude::*,
 };
 use half::bf16;
+use std::io;
+use tokenizers::Tokenizer;
 
 const kernels_ptx: &'static str = include_str!(concat!(env!("OUT_DIR"), "/kernels.ptx"));
 
-fn main() {
+fn main() -> io::Result<()> {
     let _ctx = cust::quick_init().unwrap();
     let module = Module::from_ptx(kernels_ptx, &[]).unwrap();
     // let vec_add = module.get_function("vecadd").unwrap();
     let embedding = module.get_function("embedding").unwrap();
     let stream = Stream::new(StreamFlags::NON_BLOCKING, None).unwrap();
 
-    const B: usize = 1;
-    const T: usize = 8;
-    const V: usize = 16; // GPT2 vocab size
-    const D: usize = 32; // GPT2 embedding dim
+    let prompt = "Hello, I'm a language model,";
+    let tokenizer = Tokenizer::from_pretrained("gpt2", None).unwrap();
+    let encoding = tokenizer.encode(prompt, false).unwrap();
+    let token_ids_host = encoding.get_ids();
 
-    let mut token_ids_host = vec![0u32; B * T];
-    for i in 0..(B * T) {
-        token_ids_host[i] = (i % V) as u32;
-    }
+    const B: usize = 1;
+    let T: usize = token_ids_host.len();
+    let V: usize = tokenizer.get_vocab_size(false);
+    const D: usize = 768;
 
     let mut embeddings_host = vec![bf16::ZERO; V * D];
     for i in 0..V {
@@ -58,12 +60,14 @@ fn main() {
         .copy_to(&mut out_host[..])
         .expect("out_host should be long enough");
 
-    for b in 0..B {
-        for t in 0..T {
-            println!(
-                "{:?}",
-                &out_host[(b * T * D + t * D)..(b * T * D + t * D + D)]
-            )
-        }
-    }
+    // for b in 0..B {
+    //     for t in 0..T {
+    //         println!(
+    //             "{:?}",
+    //             &out_host[(b * T * D + t * D)..(b * T * D + t * D + D)]
+    //         )
+    //     }
+    // }
+
+    Ok(())
 }

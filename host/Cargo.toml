@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 cust = { git = "https://github.com/Rust-GPU/Rust-CUDA", features = ["impl_half"] }
 half = "2.6.0"
+tokenizers = { version = "0.21.1", features = ["http"] }
 
 [build-dependencies]
 nvptx-builder = { git = "https://github.com/Gui-Yom/turbo-metrics" }
