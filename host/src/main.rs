@@ -9,6 +9,8 @@ use std::fs::File;
 use std::io;
 use tokenizers::Tokenizer;
 
+mod layers;
+
 const kernels_ptx: &'static str = include_str!(concat!(env!("OUT_DIR"), "/kernels.ptx"));
 
 const B: usize = 1;
@@ -55,7 +57,8 @@ fn main() -> io::Result<()> {
     let _ctx = cust::quick_init().unwrap();
     let module = Module::from_ptx(kernels_ptx, &[]).unwrap();
     // let vec_add = module.get_function("vecadd").unwrap();
-    let embedding = module.get_function("embedding").unwrap();
+    let embedding_kernel_fn = module.get_function("embedding").unwrap();
+    let vecadd_kernel_fn = module.get_function("vecadd").unwrap();
     let stream = Stream::new(StreamFlags::NON_BLOCKING, None).unwrap();
 
     // TOKENIZER
@@ -72,63 +75,32 @@ fn main() -> io::Result<()> {
 
     // wte
     let wte: DeviceBuffer<bf16> = DeviceBuffer::from_slice(model.wte.as_slice()).unwrap();
-    let mut token_embeddings: DeviceBuffer<bf16> =
-        unsafe { DeviceBuffer::uninitialized(B * T * D).unwrap() };
-
-    let grid_size = GridSize::xy(B as u32, T as u32);
-    let block_size = BlockSize::xy(1, 1);
-    unsafe {
-        launch!(
-            embedding<<<grid_size, block_size, 0, stream>>>(
-                wte.as_device_ptr(),
-                token_ids.as_device_ptr(),
-                token_embeddings.as_device_ptr(),
-                B,
-                T,
-                D,
-                V,
-            )
-        );
-    }
+    let token_embeddings: DeviceBuffer<bf16> =
+        layers::embedding(&embedding_kernel_fn, &stream, &wte, V, D, &token_ids, B, T);
 
     // wpe
     let wpe: DeviceBuffer<bf16> = DeviceBuffer::from_slice(model.wpe.as_slice()).unwrap();
     let positions_host = (0..T as u32).collect::<Vec<u32>>();
     let positions: DeviceBuffer<u32> = DeviceBuffer::from_slice(&positions_host).unwrap();
-    let mut token_position_embeddings: DeviceBuffer<bf16> =
-        unsafe { DeviceBuffer::uninitialized(B * T * D).unwrap() };
-
-    let grid_size = GridSize::xy(B as u32, T as u32);
-    let block_size = BlockSize::xy(1, 1);
-    unsafe {
-        launch!(
-            embedding<<<grid_size, block_size, 0, stream>>>(
-                wpe.as_device_ptr(),
-                positions.as_device_ptr(),
-                token_position_embeddings.as_device_ptr(),
-                B,
-                T,
-                D,
-                1024,
-            )
-        );
-    }
+    let mut token_position_embeddings: DeviceBuffer<bf16> = layers::embedding(
+        &embedding_kernel_fn,
+        &stream,
+        &wpe,
+        1024,
+        D,
+        &positions,
+        B,
+        T,
+    );
 
     // sum
-    let embeddings: DeviceBuffer<bf16> = unsafe { DeviceBuffer::uninitialized(B * T * D).unwrap() };
-
-    let grid_size = GridSize::x(((B * T * D) as f32 / 256.0).ceil() as u32);
-    let block_size = BlockSize::x(256);
-    unsafe {
-        launch!(
-            module.vecadd<<<grid_size, block_size, 0, stream>>>(
-                token_embeddings.as_device_ptr(),
-                token_position_embeddings.as_device_ptr(),
-                embeddings.as_device_ptr(),
-                B * T * D
-            )
-        );
-    }
+    let embeddings: DeviceBuffer<bf16> = layers::vecadd(
+        &vecadd_kernel_fn,
+        &stream,
+        &token_embeddings,
+        &token_position_embeddings,
+        B * T * D,
+    );
 
     stream.synchronize().unwrap();
 
