@@ -9,7 +9,7 @@ use half::bf16;
 use nvptx_std::prelude::*;
 
 #[unsafe(no_mangle)]
-pub unsafe extern "ptx-kernel" fn vecadd(
+pub unsafe extern "ptx-kernel" fn vec_add(
     a: *const bf16,
     b: *const bf16,
     mut out: *mut bf16,
