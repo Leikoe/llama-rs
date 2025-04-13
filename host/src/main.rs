@@ -10,8 +10,6 @@ use std::fs::File;
 use std::io;
 use tokenizers::Tokenizer;
 
-mod layers;
-
 const kernels_ptx: &'static str = include_str!(concat!(env!("OUT_DIR"), "/kernels.ptx"));
 
 const B: usize = 1;
@@ -84,16 +82,29 @@ impl CudaExecutionContext {
         batch: usize,
         tokens: usize,
     ) -> DeviceBuffer<bf16> {
-        layers::embedding(
-            &self.module.get_function("embedding").unwrap(),
-            &self.stream,
-            embedding_weights,
-            num_embeddings,
-            embedding_dim,
-            inputs,
-            batch,
-            tokens,
-        )
+        let module = &self.module;
+        let stream = &self.stream;
+
+        let mut embeddings: DeviceBuffer<bf16> =
+            unsafe { DeviceBuffer::uninitialized(batch * tokens * embedding_dim).unwrap() }; // (batch, tokens, embedding_dim)
+
+        let grid_size = GridSize::xy(batch as u32, tokens as u32);
+        let block_size = BlockSize::xy(1, 1);
+        unsafe {
+            launch!(
+                module.embedding<<<grid_size, block_size, 0, stream>>>(
+                    embedding_weights.as_device_ptr(),
+                    inputs.as_device_ptr(),
+                    embeddings.as_device_ptr(),
+                    batch,
+                    tokens,
+                    embedding_dim,
+                    num_embeddings,
+                )
+            );
+        }
+
+        embeddings
     }
 
     fn vec_add(
@@ -102,13 +113,24 @@ impl CudaExecutionContext {
         b: &DeviceBuffer<bf16>, // (n,)
         n: usize,
     ) -> DeviceBuffer<bf16> {
-        layers::vecadd(
-            &self.module.get_function("vec_add").unwrap(),
-            &self.stream,
-            a,
-            b,
-            n,
-        )
+        let module = &self.module;
+        let stream = &self.stream;
+        let mut res: DeviceBuffer<bf16> = unsafe { DeviceBuffer::uninitialized(n).unwrap() };
+
+        let grid_size = GridSize::x((n as f32 / 256.0).ceil() as u32);
+        let block_size = BlockSize::x(256);
+        unsafe {
+            launch!(
+                module.vec_add<<<grid_size, block_size, 0, stream>>>(
+                    a.as_device_ptr(),
+                    b.as_device_ptr(),
+                    res.as_device_ptr(),
+                    n
+                )
+            );
+        }
+
+        res
     }
 }
 
@@ -169,14 +191,21 @@ fn main() -> io::Result<()> {
 
     let token_ids: DeviceBuffer<u32> = DeviceBuffer::from_slice(&token_ids_host).unwrap();
 
-    let embeddings = model.forward(&token_ids);
+    let logits_device = model.forward(&token_ids);
 
-    let out_host = embeddings.as_host_vec().unwrap();
+    let logits_host = logits_device.as_host_vec().unwrap();
+
+    // argmax sampling
+    // for b in 0..B {
+    //     let last_token_logits = &logits_host[(b * T * D + (T - 1) * D)..(b * T * D + T * D)]; // (D)
+    //     let argmax
+    // }
+
     for b in 0..B {
         for t in 0..T {
             println!(
                 "{:?}",
-                &out_host[(b * T * D + t * D)..(b * T * D + t * D + D)]
+                &logits_host[(b * T * D + t * D)..(b * T * D + t * D + D)]
             )
         }
     }
