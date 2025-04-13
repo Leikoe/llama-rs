@@ -1,6 +1,6 @@
 use cust::{
     function::{BlockSize, GridSize},
-    memory::{DeviceCopy, memcpy_htod},
+    module::ModuleJitOption,
     prelude::*,
 };
 use half::bf16;
@@ -10,7 +10,7 @@ use std::fs::File;
 use std::io;
 use tokenizers::Tokenizer;
 
-const kernels_ptx: &'static str = include_str!(concat!(env!("OUT_DIR"), "/kernels.ptx"));
+const KERNELS_PTX: &'static str = include_str!(concat!(env!("OUT_DIR"), "/kernels.ptx"));
 
 const B: usize = 1;
 const V: usize = 50257;
@@ -64,7 +64,11 @@ struct CudaExecutionContext {
 impl CudaExecutionContext {
     fn new() -> Self {
         let ctx = cust::quick_init().unwrap();
-        let module = Module::from_ptx(kernels_ptx, &[]).unwrap();
+        let module = Module::from_ptx(
+            KERNELS_PTX,
+            &[ModuleJitOption::Target(cust::module::JitTarget::Compute80)],
+        )
+        .unwrap();
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None).unwrap();
         Self {
             _ctx: ctx,

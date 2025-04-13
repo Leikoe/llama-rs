@@ -1,4 +1,8 @@
 [target.nvptx64-nvidia-cuda]
-# ref: https://developer.nvidia.com/cuda-gpus
-#rustflags = ["-Z", "unstable-options", "-C", "linker-flavor=llbc", "-C", "target-cpu=sm_89", "-Z", "tune-cpu=sm_89"]
-rustflags = ["-Z", "unstable-options", "-C", "linker-flavor=llbc"]
+rustflags = [
+    "-Z", "unstable-options",
+    "-C", "linker-flavor=llbc",
+    "-C", "target-feature=+ptx86",
+    "-C", "target-cpu=sm_80",
+    "-Z", "tune-cpu=sm_80",
+]
