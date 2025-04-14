@@ -1,8 +1,4 @@
-use cust::{
-    function::{BlockSize, GridSize},
-    module::ModuleJitOption,
-    prelude::*,
-};
+use cust::prelude::*;
 use half::bf16;
 use memmap2::MmapOptions;
 use safetensors::{Dtype, SafeTensors, tensor::TensorView};
@@ -10,7 +6,8 @@ use std::fs::File;
 use std::io;
 use tokenizers::Tokenizer;
 
-const KERNELS_PTX: &'static str = include_str!(concat!(env!("OUT_DIR"), "/kernels.ptx"));
+mod cuda_execution_context;
+use cuda_execution_context::CudaExecutionContext;
 
 const B: usize = 1;
 const V: usize = 50257;
@@ -55,89 +52,6 @@ impl Gpt2Weights {
     }
 }
 
-struct CudaExecutionContext {
-    _ctx: Context, // IMPORTANT: needs to be around for the full duration of the program
-    module: Module,
-    stream: Stream,
-}
-
-impl CudaExecutionContext {
-    fn new() -> Self {
-        let ctx = cust::quick_init().unwrap();
-        let module = Module::from_ptx(
-            KERNELS_PTX,
-            &[ModuleJitOption::Target(cust::module::JitTarget::Compute80)],
-        )
-        .unwrap();
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None).unwrap();
-        Self {
-            _ctx: ctx,
-            module,
-            stream,
-        }
-    }
-
-    fn embedding(
-        &self,
-        embedding_weights: &DeviceBuffer<bf16>, // (num_embeddings, embedding_dim)
-        num_embeddings: usize,
-        embedding_dim: usize,
-        inputs: &DeviceBuffer<u32>, // (batch, tokens)
-        batch: usize,
-        tokens: usize,
-    ) -> DeviceBuffer<bf16> {
-        let module = &self.module;
-        let stream = &self.stream;
-
-        let mut embeddings: DeviceBuffer<bf16> =
-            unsafe { DeviceBuffer::uninitialized(batch * tokens * embedding_dim).unwrap() }; // (batch, tokens, embedding_dim)
-
-        let grid_size = GridSize::xy(batch as u32, tokens as u32);
-        let block_size = BlockSize::xy(1, 1);
-        unsafe {
-            launch!(
-                module.embedding<<<grid_size, block_size, 0, stream>>>(
-                    embedding_weights.as_device_ptr(),
-                    inputs.as_device_ptr(),
-                    embeddings.as_device_ptr(),
-                    batch,
-                    tokens,
-                    embedding_dim,
-                    num_embeddings,
-                )
-            );
-        }
-
-        embeddings
-    }
-
-    fn vec_add(
-        &self,
-        a: &DeviceBuffer<bf16>, // (n,)
-        b: &DeviceBuffer<bf16>, // (n,)
-        n: usize,
-    ) -> DeviceBuffer<bf16> {
-        let module = &self.module;
-        let stream = &self.stream;
-        let mut res: DeviceBuffer<bf16> = unsafe { DeviceBuffer::uninitialized(n).unwrap() };
-
-        let grid_size = GridSize::x((n as f32 / 256.0).ceil() as u32);
-        let block_size = BlockSize::x(256);
-        unsafe {
-            launch!(
-                module.vec_add<<<grid_size, block_size, 0, stream>>>(
-                    a.as_device_ptr(),
-                    b.as_device_ptr(),
-                    res.as_device_ptr(),
-                    n
-                )
-            );
-        }
-
-        res
-    }
-}
-
 struct Gpt2Model<'a> {
     weights: Gpt2Weights,
     execution_ctx: &'a CudaExecutionContext,
@@ -176,7 +90,7 @@ impl<'a> Gpt2Model<'a> {
             B * seq_len * D,
         );
 
-        self.execution_ctx.stream.synchronize().unwrap();
+        self.execution_ctx.synchronize();
 
         embeddings
     }

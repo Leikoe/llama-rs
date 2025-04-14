@@ -22,7 +22,9 @@ pub unsafe extern "ptx-kernel" fn vec_add(
     let idx = coords_1d();
 
     if idx < N {
-        *out.wrapping_add(idx) = *a.wrapping_add(idx) + *b.wrapping_add(idx);
+        unsafe {
+            *out.wrapping_add(idx) = *a.wrapping_add(idx) + *b.wrapping_add(idx);
+        }
     }
 }
 
