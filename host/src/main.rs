@@ -14,8 +14,10 @@ const V: usize = 50257;
 const D: usize = 768;
 
 struct Gpt2Weights {
-    wte: DeviceBuffer<bf16>, // (V, D)
-    wpe: DeviceBuffer<bf16>, // (1024, D)
+    wte: DeviceBuffer<bf16>,         // (V, D)
+    wpe: DeviceBuffer<bf16>,         // (1024, D)
+    ln_f_weight: DeviceBuffer<bf16>, // (D,)
+    ln_f_bias: DeviceBuffer<bf16>,   // (D,)
 }
 
 impl Gpt2Weights {
@@ -24,6 +26,8 @@ impl Gpt2Weights {
         let mut model = Gpt2Weights {
             wte: unsafe { DeviceBuffer::uninitialized(V * D).unwrap() },
             wpe: unsafe { DeviceBuffer::uninitialized(1024 * D).unwrap() },
+            ln_f_weight: unsafe { DeviceBuffer::uninitialized(D).unwrap() },
+            ln_f_bias: unsafe { DeviceBuffer::uninitialized(D).unwrap() },
         };
 
         let buffer = unsafe { MmapOptions::new().map(&file).unwrap() };
@@ -34,6 +38,11 @@ impl Gpt2Weights {
 
         Self::load_tensor(&mut model.wte, tensors.tensor("wte.weight").unwrap());
         Self::load_tensor(&mut model.wpe, tensors.tensor("wpe.weight").unwrap());
+        Self::load_tensor(
+            &mut model.ln_f_weight,
+            tensors.tensor("ln_f.weight").unwrap(),
+        );
+        Self::load_tensor(&mut model.ln_f_bias, tensors.tensor("ln_f.bias").unwrap());
 
         Ok(model)
     }
