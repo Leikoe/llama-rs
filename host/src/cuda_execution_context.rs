@@ -268,8 +268,9 @@ mod tests {
 
         for b in 0..B {
             for t in 0..T {
-                let input_token_embedding =
-                    &input_host[(b * T * D + t * D)..(b * T * D + t * D + D)];
+                let start_idx = b * T * D + t * D;
+
+                let input_token_embedding = &input_host[start_idx..(start_idx + D)];
                 let avg = input_token_embedding
                     .into_iter()
                     .map(|v| v.to_f32())
@@ -280,16 +281,18 @@ mod tests {
                     .map(|v| (v.to_f32() - avg).powi(2))
                     .sum::<f32>()
                     / D as f32;
-                let layer_normed = input_token_embedding
+                let mut layer_normed = input_token_embedding
                     .into_iter()
                     .map(|v| (v.to_f32() - avg) / (var + EPSILON).sqrt())
                     .map(bf16::from_f32)
                     .collect::<Vec<bf16>>();
 
-                assert_eq!(
-                    layer_normed,
-                    &out_host[(b * T * D + t * D)..(b * T * D + t * D + D)]
-                );
+                for i in 0..D {
+                    layer_normed[i] *= ln_weight_host[i];
+                    layer_normed[i] += ln_bias_host[i];
+                }
+
+                assert_eq!(layer_normed, &out_host[start_idx..(start_idx + D)]);
             }
         }
     }
