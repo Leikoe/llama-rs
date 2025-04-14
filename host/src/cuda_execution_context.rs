@@ -96,6 +96,42 @@ impl CudaExecutionContext {
         res
     }
 
+    pub fn layer_norm(
+        &self,
+        weight: &DeviceBuffer<bf16>, // (d,)
+        bias: &DeviceBuffer<bf16>,   // (d,)
+        epsilon: f32,
+        input: &DeviceBuffer<bf16>, // (b, t, d)
+        B: usize,
+        T: usize,
+        D: usize,
+    ) -> DeviceBuffer<bf16> {
+        let module = &self.module;
+        let stream = &self.stream;
+
+        let mut layer_norm: DeviceBuffer<bf16> =
+            unsafe { DeviceBuffer::uninitialized(B * T * D).unwrap() }; // (b, t, d)
+
+        let grid_size = GridSize::xy(B as u32, T as u32);
+        let block_size = BlockSize::xy(1, 1);
+        unsafe {
+            launch!(
+                module.layer_norm<<<grid_size, block_size, 0, stream>>>(
+                    weight.as_device_ptr(),
+                    bias.as_device_ptr(),
+                    epsilon,
+                    input.as_device_ptr(),
+                    layer_norm.as_device_ptr(),
+                    B,
+                    T,
+                    D,
+                )
+            );
+        }
+
+        layer_norm
+    }
+
     pub fn empty<T: DeviceCopy>(len: usize) -> Result<DeviceBuffer<T>, CudaErr> {
         unsafe { DeviceBuffer::<T>::uninitialized(len).map_err(|_| CudaErr::OOM) }
     }
@@ -181,6 +217,78 @@ mod tests {
                 assert_eq!(
                     token_embedding,
                     &embedding_weights_host[(token_id * D)..(token_id * D + D)]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_layer_norm_simple() {
+        let ctx = CudaExecutionContext::new();
+        const B: usize = 16;
+        const T: usize = 64;
+        const D: usize = 768;
+        const EPSILON: f32 = 1e-05;
+
+        // create the input
+        let mut input_host = unsafe { Box::<[bf16; B * T * D]>::new_uninit().assume_init() };
+        for b in 0..B {
+            for t in 0..T {
+                for d in 0..D {
+                    input_host[b * T * D + t * D + d] = bf16::from_f32(t as f32);
+                }
+            }
+        }
+        let input_device = DeviceBuffer::<bf16>::from_slice(input_host.as_slice()).unwrap();
+
+        // create layer norm weight and bias
+        // weight
+        let mut ln_weight_host = unsafe { Box::<[bf16; D]>::new_uninit().assume_init() };
+        for d in 0..D {
+            ln_weight_host[d] = bf16::from_f32(d as f32);
+        }
+        let ln_weight_device = DeviceBuffer::<bf16>::from_slice(ln_weight_host.as_slice()).unwrap();
+        // bias
+        let mut ln_bias_host = unsafe { Box::<[bf16; D]>::new_uninit().assume_init() };
+        for d in 0..D {
+            ln_bias_host[d] = bf16::from_f32(d as f32);
+        }
+        let ln_bias_device = DeviceBuffer::<bf16>::from_slice(ln_bias_host.as_slice()).unwrap();
+
+        let out = ctx.layer_norm(
+            &ln_weight_device,
+            &ln_bias_device,
+            EPSILON,
+            &input_device,
+            B,
+            T,
+            D,
+        );
+        let out_host = out.as_host_vec().unwrap(); // (B, T, D)
+
+        for b in 0..B {
+            for t in 0..T {
+                let input_token_embedding =
+                    &input_host[(b * T * D + t * D)..(b * T * D + t * D + D)];
+                let avg = input_token_embedding
+                    .into_iter()
+                    .map(|v| v.to_f32())
+                    .sum::<f32>()
+                    / D as f32;
+                let var = input_token_embedding
+                    .into_iter()
+                    .map(|v| (v.to_f32() - avg).powi(2))
+                    .sum::<f32>()
+                    / D as f32;
+                let layer_normed = input_token_embedding
+                    .into_iter()
+                    .map(|v| (v.to_f32() - avg) / (var + EPSILON).sqrt())
+                    .map(bf16::from_f32)
+                    .collect::<Vec<bf16>>();
+
+                assert_eq!(
+                    layer_normed,
+                    &out_host[(b * T * D + t * D)..(b * T * D + t * D + D)]
                 );
             }
         }
