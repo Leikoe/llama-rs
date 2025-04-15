@@ -1,3 +1,4 @@
+use cust::memory::DeviceCopy;
 use cust::prelude::*;
 use half::bf16;
 use memmap2::MmapOptions;
@@ -10,6 +11,16 @@ mod cuda_execution_context;
 use cuda_execution_context::CudaExecutionContext;
 
 const B: usize = 1;
+
+type EmbeddingWeights<T> = DeviceBuffer<T>;
+struct LayerNormWeights<T: DeviceCopy> {
+    weight: DeviceBuffer<T>,
+    bias: DeviceBuffer<T>,
+}
+struct LinearWeights<T: DeviceCopy> {
+    weight: DeviceBuffer<T>,
+    bias: DeviceBuffer<T>,
+}
 
 #[derive(Debug, Clone, Copy)]
 struct Gpt2Config {
@@ -29,10 +40,9 @@ const GPT2CONFIG: Gpt2Config = Gpt2Config {
 };
 
 struct Gpt2Weights {
-    wte: DeviceBuffer<bf16>,         // (V, D)
-    wpe: DeviceBuffer<bf16>,         // (1024, D)
-    ln_f_weight: DeviceBuffer<bf16>, // (D,)
-    ln_f_bias: DeviceBuffer<bf16>,   // (D,)
+    wte: EmbeddingWeights<bf16>,  // (V, D)
+    wpe: EmbeddingWeights<bf16>,  // (1024, D)
+    ln_f: LayerNormWeights<bf16>, // weight: (D,), bias: (D,)
 }
 
 impl Gpt2Weights {
@@ -46,8 +56,10 @@ impl Gpt2Weights {
             wpe: unsafe {
                 DeviceBuffer::uninitialized(config.max_seq_len * config.n_embed).unwrap()
             },
-            ln_f_weight: unsafe { DeviceBuffer::uninitialized(config.n_embed).unwrap() },
-            ln_f_bias: unsafe { DeviceBuffer::uninitialized(config.n_embed).unwrap() },
+            ln_f: LayerNormWeights {
+                weight: unsafe { DeviceBuffer::uninitialized(config.n_embed).unwrap() },
+                bias: unsafe { DeviceBuffer::uninitialized(config.n_embed).unwrap() },
+            },
         };
 
         let buffer = unsafe { MmapOptions::new().map(&file).unwrap() };
@@ -59,10 +71,10 @@ impl Gpt2Weights {
         Self::load_tensor(&mut model.wte, tensors.tensor("wte.weight").unwrap());
         Self::load_tensor(&mut model.wpe, tensors.tensor("wpe.weight").unwrap());
         Self::load_tensor(
-            &mut model.ln_f_weight,
+            &mut model.ln_f.weight,
             tensors.tensor("ln_f.weight").unwrap(),
         );
-        Self::load_tensor(&mut model.ln_f_bias, tensors.tensor("ln_f.bias").unwrap());
+        Self::load_tensor(&mut model.ln_f.bias, tensors.tensor("ln_f.bias").unwrap());
 
         Ok(model)
     }
@@ -136,8 +148,8 @@ impl<'a> Gpt2Model<'a> {
 
         // h = self.ln_f(h)
         let h = self.execution_ctx.layer_norm(
-            &self.weights.ln_f_weight,
-            &self.weights.ln_f_bias,
+            &self.weights.ln_f.weight,
+            &self.weights.ln_f.bias,
             1e-5,
             &embeddings,
             B,
