@@ -128,10 +128,10 @@ fn main() -> io::Result<()> {
     let encoding = tokenizer.encode(prompt, false).unwrap();
     let mut token_ids_host = encoding.get_ids().to_vec();
 
-    for _ in 0..128 {
+    for _ in 0..1024 {
         let T: usize = token_ids_host.len();
 
-        let token_ids: DeviceBuffer<u32> = DeviceBuffer::from_slice(&token_ids_host).unwrap();
+        let token_ids: DeviceBuffer<u32> = DeviceBuffer::from_slice(&token_ids_host).unwrap(); // NOTE: this is very stupid, it could work without it because of BS=1 but I'm still doing it for correctness
 
         let logits_device = model.forward(&token_ids);
 
