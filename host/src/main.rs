@@ -10,8 +10,23 @@ mod cuda_execution_context;
 use cuda_execution_context::CudaExecutionContext;
 
 const B: usize = 1;
-const V: usize = 50257;
-const D: usize = 768;
+
+#[derive(Debug, Clone, Copy)]
+struct Gpt2Config {
+    n_vocab: usize,
+    max_seq_len: usize,
+    n_layers: usize,
+    n_heads: usize,
+    n_embed: usize,
+}
+
+const GPT2CONFIG: Gpt2Config = Gpt2Config {
+    n_vocab: 50257,
+    max_seq_len: 1024,
+    n_layers: 12,
+    n_heads: 12,
+    n_embed: 768,
+};
 
 struct Gpt2Weights {
     wte: DeviceBuffer<bf16>,         // (V, D)
@@ -21,13 +36,18 @@ struct Gpt2Weights {
 }
 
 impl Gpt2Weights {
-    fn new(safetensors_path: &str) -> Result<Self, safetensors::SafeTensorError> {
+    fn new(
+        config: Gpt2Config,
+        safetensors_path: &str,
+    ) -> Result<Self, safetensors::SafeTensorError> {
         let file = File::open(safetensors_path)?;
         let mut model = Gpt2Weights {
-            wte: unsafe { DeviceBuffer::uninitialized(V * D).unwrap() },
-            wpe: unsafe { DeviceBuffer::uninitialized(1024 * D).unwrap() },
-            ln_f_weight: unsafe { DeviceBuffer::uninitialized(D).unwrap() },
-            ln_f_bias: unsafe { DeviceBuffer::uninitialized(D).unwrap() },
+            wte: unsafe { DeviceBuffer::uninitialized(config.n_vocab * config.n_embed).unwrap() },
+            wpe: unsafe {
+                DeviceBuffer::uninitialized(config.max_seq_len * config.n_embed).unwrap()
+            },
+            ln_f_weight: unsafe { DeviceBuffer::uninitialized(config.n_embed).unwrap() },
+            ln_f_bias: unsafe { DeviceBuffer::uninitialized(config.n_embed).unwrap() },
         };
 
         let buffer = unsafe { MmapOptions::new().map(&file).unwrap() };
@@ -62,6 +82,7 @@ impl Gpt2Weights {
 }
 
 struct Gpt2Model<'a> {
+    config: Gpt2Config,
     weights: Gpt2Weights,
     execution_ctx: &'a CudaExecutionContext,
 }
@@ -69,10 +90,12 @@ struct Gpt2Model<'a> {
 impl<'a> Gpt2Model<'a> {
     fn new(
         safetensors_path: &str,
+        config: Gpt2Config,
         execution_ctx: &'a CudaExecutionContext,
     ) -> Result<Self, safetensors::SafeTensorError> {
         Ok(Self {
-            weights: Gpt2Weights::new(safetensors_path)?,
+            config,
+            weights: Gpt2Weights::new(config, safetensors_path)?,
             execution_ctx,
         })
     }
@@ -81,22 +104,32 @@ impl<'a> Gpt2Model<'a> {
         let seq_len = token_ids.len();
 
         // wte
-        let token_embeddings: DeviceBuffer<bf16> =
-            self.execution_ctx
-                .embedding(&self.weights.wte, V, D, &token_ids, B, seq_len);
+        let token_embeddings: DeviceBuffer<bf16> = self.execution_ctx.embedding(
+            &self.weights.wte,
+            self.config.n_vocab,
+            self.config.n_embed,
+            &token_ids,
+            B,
+            seq_len,
+        );
 
         // wpe
         let positions_host = (0..seq_len as u32).collect::<Vec<u32>>();
         let positions: DeviceBuffer<u32> = DeviceBuffer::from_slice(&positions_host).unwrap();
-        let token_position_embeddings: DeviceBuffer<bf16> =
-            self.execution_ctx
-                .embedding(&self.weights.wpe, 1024, D, &positions, B, seq_len);
+        let token_position_embeddings: DeviceBuffer<bf16> = self.execution_ctx.embedding(
+            &self.weights.wpe,
+            self.config.max_seq_len,
+            self.config.n_embed,
+            &positions,
+            B,
+            seq_len,
+        );
 
         // h = wte + wpe
         let embeddings: DeviceBuffer<bf16> = self.execution_ctx.vec_add(
             &token_embeddings,
             &token_position_embeddings,
-            B * seq_len * D,
+            B * seq_len * self.config.n_embed,
         );
 
         // apply blocks
@@ -109,7 +142,7 @@ impl<'a> Gpt2Model<'a> {
             &embeddings,
             B,
             seq_len,
-            D,
+            self.config.n_embed,
         );
 
         self.execution_ctx.synchronize();
@@ -121,8 +154,9 @@ impl<'a> Gpt2Model<'a> {
 fn main() -> io::Result<()> {
     let ctx = CudaExecutionContext::new();
 
+    let model_config = GPT2CONFIG;
+    let model = Gpt2Model::new("model.safetensors", model_config, &ctx).unwrap();
     let tokenizer = Tokenizer::from_pretrained("gpt2", None).unwrap();
-    let model = Gpt2Model::new("model.safetensors", &ctx).unwrap();
 
     let prompt = "Hello, I'm a language model,";
     let encoding = tokenizer.encode(prompt, false).unwrap();
@@ -139,7 +173,9 @@ fn main() -> io::Result<()> {
 
         // argmax sampling
         let b = 0; // only decode batch 0
-        let last_token_logits = &logits_host[(b * T * D + (T - 1) * D)..(b * T * D + T * D)]; // (D)
+        let last_token_logits = &logits_host[(b * T * model.config.n_embed
+            + (T - 1) * model.config.n_embed)
+            ..(b * T * model.config.n_embed + T * model.config.n_embed)]; // (D)
         let (next_token_id, _max) = last_token_logits
             .into_iter()
             .enumerate()
@@ -151,15 +187,6 @@ fn main() -> io::Result<()> {
         token_ids_host.push(next_token_id as u32);
         println!("{}", tokenizer.decode(&token_ids_host, false).unwrap());
     }
-
-    // for b in 0..B {
-    //     for t in 0..T {
-    //         println!(
-    //             "{:?}",
-    //             &logits_host[(b * T * D + t * D)..(b * T * D + t * D + D)]
-    //         )
-    //     }
-    // }
 
     Ok(())
 }
