@@ -99,9 +99,22 @@ impl<'a> Gpt2Model<'a> {
             B * seq_len * D,
         );
 
+        // apply blocks
+
+        // h = self.ln_f(h)
+        let h = self.execution_ctx.layer_norm(
+            &self.weights.ln_f_weight,
+            &self.weights.ln_f_bias,
+            1e-5,
+            &embeddings,
+            B,
+            seq_len,
+            D,
+        );
+
         self.execution_ctx.synchronize();
 
-        embeddings
+        h
     }
 }
 
@@ -113,29 +126,40 @@ fn main() -> io::Result<()> {
 
     let prompt = "Hello, I'm a language model,";
     let encoding = tokenizer.encode(prompt, false).unwrap();
-    let token_ids_host = encoding.get_ids();
-    let T: usize = token_ids_host.len();
+    let mut token_ids_host = encoding.get_ids().to_vec();
 
-    let token_ids: DeviceBuffer<u32> = DeviceBuffer::from_slice(&token_ids_host).unwrap();
+    for _ in 0..128 {
+        let T: usize = token_ids_host.len();
 
-    let logits_device = model.forward(&token_ids);
+        let token_ids: DeviceBuffer<u32> = DeviceBuffer::from_slice(&token_ids_host).unwrap();
 
-    let logits_host = logits_device.as_host_vec().unwrap();
+        let logits_device = model.forward(&token_ids);
 
-    // argmax sampling
-    // for b in 0..B {
-    //     let last_token_logits = &logits_host[(b * T * D + (T - 1) * D)..(b * T * D + T * D)]; // (D)
-    //     let argmax
-    // }
+        let logits_host = logits_device.as_host_vec().unwrap();
 
-    for b in 0..B {
-        for t in 0..T {
-            println!(
-                "{:?}",
-                &logits_host[(b * T * D + t * D)..(b * T * D + t * D + D)]
-            )
-        }
+        // argmax sampling
+        let b = 0; // only decode batch 0
+        let last_token_logits = &logits_host[(b * T * D + (T - 1) * D)..(b * T * D + T * D)]; // (D)
+        let (next_token_id, _max) = last_token_logits
+            .into_iter()
+            .enumerate()
+            .max_by(|(_idx1, val1), (_idx2, val2)| val1.total_cmp(val2))
+            .unwrap();
+
+        // let next_token = tokenizer.decode(&[next_token_id as u32], false).unwrap();
+        // println!("next token: {} ({})", next_token, next_token_id);
+        token_ids_host.push(next_token_id as u32);
+        println!("{}", tokenizer.decode(&token_ids_host, false).unwrap());
     }
+
+    // for b in 0..B {
+    //     for t in 0..T {
+    //         println!(
+    //             "{:?}",
+    //             &logits_host[(b * T * D + t * D)..(b * T * D + t * D + D)]
+    //         )
+    //     }
+    // }
 
     Ok(())
 }
